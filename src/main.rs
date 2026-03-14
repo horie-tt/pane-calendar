@@ -8,7 +8,9 @@ use eframe::egui;
 use domain::calendar::ViewMode;
 use domain::selection::SelectionManager;
 use infrastructure::config::ConfigManager;
-use ui::calendar_view::CalendarView;
+use ui::calendar_view::{CalendarView, DragState};
+use ui::selection_overlay::SelectionOverlay;
+use ui::toolbar::Toolbar;
 
 fn main() -> eframe::Result<()> {
     env_logger::init();
@@ -17,7 +19,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([800.0, 400.0])
+            .with_inner_size([800.0, 500.0])
             .with_title("Pane Calendar"),
         ..Default::default()
     };
@@ -34,7 +36,9 @@ struct PaneCalendarApp {
     base_year: i32,
     base_month: u32,
     fiscal_year_start: bool,
+    always_on_top: bool,
     selection: SelectionManager,
+    drag_state: DragState,
 }
 
 impl PaneCalendarApp {
@@ -45,21 +49,49 @@ impl PaneCalendarApp {
             base_year: today.year(),
             base_month: today.month(),
             fiscal_year_start: config.fiscal_year_start,
+            always_on_top: config.always_on_top,
             selection: SelectionManager::new(),
+            drag_state: DragState::default(),
         }
     }
 }
 
 impl eframe::App for PaneCalendarApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ピン留め状態をウィンドウに反映
+        let level = if self.always_on_top {
+            egui::WindowLevel::AlwaysOnTop
+        } else {
+            egui::WindowLevel::Normal
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+
         egui::CentralPanel::default().show(ctx, |ui| {
+            // ツールバー
+            Toolbar::show(
+                ui,
+                &mut self.view_mode,
+                &mut self.base_year,
+                &mut self.base_month,
+                &mut self.always_on_top,
+            );
+
+            ui.separator();
+
+            // 日数・営業日表示 + クリアボタン
+            if SelectionOverlay::show_with_clear(ui, &self.selection) {
+                self.selection.clear();
+            }
+
+            // カレンダー本体
             CalendarView::show(
                 ui,
                 self.view_mode,
                 self.base_year,
                 self.base_month,
                 self.fiscal_year_start,
-                &self.selection,
+                &mut self.selection,
+                &mut self.drag_state,
             );
         });
     }
