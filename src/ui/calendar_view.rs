@@ -1,7 +1,7 @@
-// CalendarView: 月グリッド描画と表示モード切替
+// CalendarView: 月グリッド描画・クリック/ドラッグ操作・表示モード切替
 
 use chrono::{Datelike, Local, NaiveDate, Weekday};
-use eframe::egui::{self, Color32, Sense, Vec2};
+use eframe::egui::{self, Color32, PointerButton, Sense, Vec2};
 
 use crate::domain::calendar::{CalendarModel, MonthGrid, ViewMode};
 use crate::domain::holiday::HolidayService;
@@ -11,29 +11,36 @@ use crate::ui::theme::Theme;
 /// 曜日ヘッダーラベル（日曜始まり）
 const WEEKDAY_LABELS: [&str; 7] = ["日", "月", "火", "水", "木", "金", "土"];
 
+/// ドラッグ状態（月を跨ぐドラッグのためApp側で保持）
+#[derive(Default)]
+pub struct DragState {
+    pub dragging: bool,
+    pub start_date: Option<NaiveDate>,
+}
+
 pub struct CalendarView;
 
 impl CalendarView {
-    /// 指定された表示モード・基準年月でカレンダー全体を描画する
+    /// カレンダー全体を描画する。クリック/ドラッグ操作を検出し selection を更新する
     pub fn show(
         ui: &mut eframe::egui::Ui,
         mode: ViewMode,
         base_year: i32,
         base_month: u32,
         fiscal_year_start: bool,
-        selection: &SelectionManager,
+        selection: &mut SelectionManager,
+        drag_state: &mut DragState,
     ) {
         let grids = CalendarModel::months_for_mode(mode, base_year, base_month, fiscal_year_start);
         let layout = CalendarModel::layout_for_mode(mode);
         let today = Local::now().date_naive();
 
-        // グリッドを行×列で並べて描画
         for row in 0..layout.rows {
             ui.horizontal(|ui| {
                 for col in 0..layout.columns {
                     let idx = row * layout.columns + col;
                     if let Some(grid) = grids.get(idx) {
-                        Self::show_month(ui, grid, today, selection);
+                        Self::show_month(ui, grid, today, selection, drag_state);
                     }
                 }
             });
@@ -45,24 +52,21 @@ impl CalendarView {
         ui: &mut eframe::egui::Ui,
         grid: &MonthGrid,
         today: NaiveDate,
-        selection: &SelectionManager,
+        selection: &mut SelectionManager,
+        drag_state: &mut DragState,
     ) {
         let cell_size = Vec2::new(36.0, 28.0);
-        let header_height = 24.0;
         let total_width = cell_size.x * 7.0;
+        let header_height = 24.0;
 
         ui.vertical(|ui| {
-            // 月ヘッダー（例: "2026年3月"）
             Self::show_month_header(ui, grid, total_width, header_height);
-
-            // 曜日ヘッダー
             Self::show_weekday_header(ui, cell_size);
 
-            // 日付グリッド
             for week in &grid.weeks {
                 ui.horizontal(|ui| {
-                    for (col_idx, day_opt) in week.iter().enumerate() {
-                        Self::show_day_cell(ui, *day_opt, col_idx, grid, today, selection, cell_size);
+                    for day_opt in week.iter() {
+                        Self::show_day_cell(ui, *day_opt, grid, today, selection, drag_state, cell_size);
                     }
                 });
             }
@@ -113,23 +117,19 @@ impl CalendarView {
         });
     }
 
-    /// 日付セルを1つ描画する
+    /// 日付セルを1つ描画し、クリック/ドラッグを検出して selection を更新する
     fn show_day_cell(
         ui: &mut eframe::egui::Ui,
         day_opt: Option<u32>,
-        col: usize,
         grid: &MonthGrid,
         today: NaiveDate,
-        selection: &SelectionManager,
+        selection: &mut SelectionManager,
+        drag_state: &mut DragState,
         cell_size: Vec2,
     ) {
-        let (rect, _) = ui.allocate_exact_size(cell_size, Sense::hover());
-        if !ui.is_rect_visible(rect) {
-            return;
-        }
-
+        // 空セル（その月に属さない日）
         let Some(day) = day_opt else {
-            // 空セル（その月に属さない）
+            let (rect, _) = ui.allocate_exact_size(cell_size, Sense::hover());
             ui.painter().rect_filled(rect, 0.0, Color32::TRANSPARENT);
             return;
         };
@@ -137,12 +137,43 @@ impl CalendarView {
         let date = NaiveDate::from_ymd_opt(grid.year, grid.month, day)
             .expect("invalid date in grid");
 
+        // クリック・ドラッグ両対応のSense
+        let (rect, response) = ui.allocate_exact_size(cell_size, Sense::click_and_drag());
+
+        // --- インタラクション処理 ---
+        if response.drag_started_by(PointerButton::Primary) {
+            // ドラッグ開始: 既存選択をクリアして開始日を記録
+            drag_state.dragging = true;
+            drag_state.start_date = Some(date);
+            selection.set_drag_range(date, date);
+        } else if drag_state.dragging && response.dragged_by(PointerButton::Primary) {
+            // ドラッグ中: プレビュー範囲を更新
+            if let Some(start) = drag_state.start_date {
+                selection.update_drag_preview(date);
+                selection.set_drag_range(start, date);
+            }
+        } else if drag_state.dragging && response.drag_stopped() {
+            // ドラッグ終了: 範囲を確定
+            if let Some(start) = drag_state.start_date {
+                selection.set_drag_range(start, date);
+            }
+            drag_state.dragging = false;
+            drag_state.start_date = None;
+        } else if response.clicked_by(PointerButton::Primary) && !drag_state.dragging {
+            // クリック: トグル選択
+            selection.toggle_date(date);
+        }
+
+        // --- 描画 ---
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+
         let is_today = date == today;
         let is_selected = selection.is_selected(date);
         let is_holiday = HolidayService::is_holiday(date);
         let weekday = date.weekday();
 
-        // 背景色（優先順位: 選択 > 今日 > 祝日/日曜 > 土曜 > 通常）
         let bg_color = if is_selected {
             Theme::BG_SELECTED
         } else if is_today {
@@ -155,7 +186,6 @@ impl CalendarView {
             Theme::BG_NORMAL
         };
 
-        // テキスト色
         let text_color = if is_today {
             Theme::TEXT_TODAY
         } else if is_holiday || weekday == Weekday::Sun {
@@ -164,6 +194,18 @@ impl CalendarView {
             Theme::TEXT_SATURDAY
         } else {
             Theme::TEXT_NORMAL
+        };
+
+        // ホバー時の軽いハイライト
+        let bg_color = if response.hovered() && !is_selected {
+            egui::Color32::from_rgba_premultiplied(
+                bg_color.r().saturating_add(20),
+                bg_color.g().saturating_add(20),
+                bg_color.b().saturating_add(20),
+                bg_color.a(),
+            )
+        } else {
+            bg_color
         };
 
         ui.painter().rect_filled(rect, 2.0, bg_color);
