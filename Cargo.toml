@@ -7,6 +7,10 @@ edition = "2024"
 name = "pane-calendar"
 path = "src/main.rs"
 
+[lib]
+name = "pane_calendar"
+path = "src/lib.rs"
+
 [dependencies]
 eframe = { version = "0.33", default-features = false, features = ["glow", "wayland", "x11"] }
 chrono = { version = "0.4", features = ["serde"] }

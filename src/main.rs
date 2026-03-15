@@ -7,7 +7,8 @@ use eframe::egui;
 
 use domain::calendar::ViewMode;
 use domain::selection::SelectionManager;
-use infrastructure::config::ConfigManager;
+use infrastructure::config::{Config, ConfigManager};
+use infrastructure::window::WindowManager;
 use ui::calendar_view::{CalendarView, DragState};
 use ui::selection_overlay::SelectionOverlay;
 use ui::toolbar::Toolbar;
@@ -17,17 +18,34 @@ fn main() -> eframe::Result<()> {
 
     let config = ConfigManager::load();
 
+    // ウィンドウサイズ・位置を設定から復元（未保存時はデフォルト値）
+    let window_size = config
+        .window_size
+        .unwrap_or([800.0, 500.0]);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size(window_size)
+        .with_title("Pane Calendar")
+        .with_transparent(true)
+        .with_decorations(false);
+
+    if let Some(pos) = config.window_position {
+        viewport = viewport.with_position(egui::Pos2::new(pos[0], pos[1]));
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([800.0, 500.0])
-            .with_title("Pane Calendar"),
+        viewport,
+        centered: config.window_position.is_none(), // 位置未保存時は画面中央
         ..Default::default()
     };
 
     eframe::run_native(
         "Pane Calendar",
         options,
-        Box::new(move |_cc| Ok(Box::new(PaneCalendarApp::new(config)))),
+        Box::new(move |cc| {
+            // Windows Acrylic 透過効果を適用（失敗時はフォールバック）
+            WindowManager::apply_acrylic(cc);
+            Ok(Box::new(PaneCalendarApp::new(config)))
+        }),
     )
 }
 
@@ -42,7 +60,7 @@ struct PaneCalendarApp {
 }
 
 impl PaneCalendarApp {
-    fn new(config: infrastructure::config::Config) -> Self {
+    fn new(config: Config) -> Self {
         let today = Local::now().date_naive();
         Self {
             view_mode: ViewMode::from(config.view_mode),
@@ -54,17 +72,14 @@ impl PaneCalendarApp {
             drag_state: DragState::default(),
         }
     }
+
+
 }
 
 impl eframe::App for PaneCalendarApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ピン留め状態をウィンドウに反映
-        let level = if self.always_on_top {
-            egui::WindowLevel::AlwaysOnTop
-        } else {
-            egui::WindowLevel::Normal
-        };
-        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+        WindowManager::apply_always_on_top(ctx, self.always_on_top);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // ツールバー
@@ -94,5 +109,21 @@ impl eframe::App for PaneCalendarApp {
                 &mut self.drag_state,
             );
         });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // 終了時に現在の設定を保存する
+        // NOTE: on_exit では Context が取得できないため、
+        // ウィンドウ位置・サイズは保存しない（view_mode 等のみ保存）
+        let config = Config {
+            view_mode: self.view_mode.into(),
+            window_position: None, // 位置はupdate内でのみ取得可能
+            window_size: None,
+            always_on_top: self.always_on_top,
+            fiscal_year_start: self.fiscal_year_start,
+        };
+        if let Err(e) = ConfigManager::save(&config) {
+            ConfigManager::write_error_log(&e);
+        }
     }
 }
